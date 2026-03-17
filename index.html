@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Franek's Playground Human AI 5.1 + Allies + GUNS</title>
+<style>
+html,body{margin:0;overflow:hidden;background:#111;font-family:sans-serif;}
+#ui{position:fixed;left:0;top:0;width:220px;height:100%;background:#222;color:#fff;padding:8px;overflow-y:auto;}
+button{width:100%;margin:4px 0;padding:6px;background:#444;color:#fff;border:0;cursor:pointer;}
+button.active{background:#888;}
+canvas{position:absolute;left:220px;top:0;}
+input[type=color]{width:100%;margin:4px 0;padding:2px;border:0;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="ui">
+<h3>Spawn</h3>
+<button onclick="select(event,'person')">Person</button>
+<button onclick="select(event,'mod')">Mod Character</button>
+<button onclick="select(event,'humanEnemy')">Human Enemy</button>
+<button onclick="select(event,'modEnemy')">Mod Enemy</button>
+<button onclick="select(event,'humanAlly')">Human Ally</button>
+<button onclick="select(event,'modAlly')">Mod Ally</button>
+<button onclick="select(event,'block')">Block</button>
+
+<h3>Block Color</h3>
+<input type="color" id="blockColor" value="#444">
+
+<h3>Tools (Hold Q)</h3>
+<button onclick="select(event,'gun')">Gun</button>
+<button onclick="select(event,'electric')">Electricity</button>
+<button onclick="select(event,'fire')">Fire</button>
+
+<hr>
+<p><b>E</b> = Spawn</p>
+<p><b>Q</b> = Use tool</p>
+<p><b>Z</b> = Undo</p>
+<p><b>F</b> = Freeze/Unfreeze block</p>
+<p><b>Mouse Wheel</b> = Resize block</p>
+
+<h3>Save / Load</h3>
+<button onclick="saveGameFile()">Save to File</button>
+<input type="file" id="loadFile" accept=".json">
+<button onclick="document.getElementById('loadFile').click();">Load from File</button>
+
+<h3>Load Mod Image</h3>
+<input type="file" id="modFile" accept="image/*">
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+const c=document.getElementById("c"),ctx=c.getContext("2d");
+function resize(){c.width=innerWidth-220;c.height=innerHeight;}
+resize();addEventListener("resize",resize);
+
+const G=0.5;
+const LEFT_EDGE=0;
+const mouse={x:0,y:0};
+let selected="person";
+let holdingQ=false;
+let undoStack=[];
+let modImage=null;
+let currentBlockColor="#444";
+
+const FACTIONS={NEUTRAL:"neutral",ALLY:"ally",ENEMY:"enemy"};
+
+function drawSpeech(ctx,text,x,y){
+ctx.font="18px Arial";
+ctx.fillStyle="white";
+ctx.strokeStyle="black";
+ctx.lineWidth=3;
+ctx.textAlign="center";
+ctx.strokeText(text,x,y);
+ctx.fillText(text,x,y);
+}
+
+// ---------- CLASSES ----------
+class RigidPart{constructor(x,y,w,h){this.x=x;this.y=y;this.w=w;this.h=h;this.vx=0;this.vy=0;this.hp=100;}
+update(collideFloor=false){this.vy+=G;this.x+=this.vx;this.y+=this.vy;
+if(this.x<LEFT_EDGE){this.x=LEFT_EDGE;this.vx*=-1;}
+if(this.x+this.w>c.width){this.x=c.width-this.w;this.vx*=-1;}
+if(collideFloor && this.y+this.h>c.height-40){this.y=c.height-40-this.h;this.vy=0;}
+blocks.forEach(b=>{if(this.x+this.w>b.x && this.x<b.x+b.w && this.y+this.h>b.y && this.y<b.y+b.h){this.y=b.y-this.h; this.vy=0;}});}
+draw(){ctx.fillStyle="#ccc";ctx.fillRect(this.x,this.y,this.w,this.h);}}
+
+class PropHuman{
+constructor(x,y){
+this.body=new RigidPart(x-10,y,20,30);
+this.head=new RigidPart(x-8,y-20,16,16);
+this.la=new RigidPart(x-30,y+5,20,8);
+this.ra=new RigidPart(x+10,y+5,20,8);
+this.ll=new RigidPart(x-10,y+30,8,20);
+this.rl=new RigidPart(x+2,y+30,8,20);
+this.parts=[this.body,this.head,this.la,this.ra,this.ll,this.rl];
+this.dragged=false;this.alive=true;
+this.walkDir=Math.random()<0.5?-1:1;
+this.walkCooldown=0;
+this.stunned=false;
+this.burning=false;
+this.burnTime=0;
+this.say="";this.sayTime=0;
+this.faction=FACTIONS.NEUTRAL;
+this.hasGun=false;
+this.gunTarget=null;
+}
+update(){
+if(!this.alive)return;
+[this.ll,this.rl].forEach(leg=>{
+blocks.forEach(b=>{if(leg.y+leg.h>b.y && leg.y<b.y+b.h && leg.x+leg.w>b.x && leg.x<b.x+b.w){this.walkDir*=-1;}});
+if(leg.x<LEFT_EDGE)this.walkDir*=-1;
+if(leg.x+leg.w>c.width)this.walkDir*=-1;
+});
+if(this.stunned)return;
+if(this.dragged){
+this.parts.forEach(p=>{p.x+=(mouse.x-(p.x+p.w/2))*0.2;p.y+=(mouse.y-(p.y+p.h/2))*0.2;});
+}
+else{
+this.walkCooldown--;if(this.walkCooldown<=0){this.walkDir=Math.random()<0.5?-1:1;this.walkCooldown=100+Math.random()*100;}
+this.ll.vx=this.walkDir*0.5;this.rl.vx=this.walkDir*0.5;
+}
+this.ll.update(true);this.rl.update(true);
+this.body.x=this.ll.x-2;this.body.y=this.ll.y-30;
+this.head.x=this.body.x+2;this.head.y=this.body.y-20;
+this.la.x=this.body.x-20;this.la.y=this.body.y+5;
+this.ra.x=this.body.x+20;this.ra.y=this.body.y+5;
+
+if(this.burning){
+this.burnTime--;
+if(this.burnTime%10===0){
+this.body.hp-=5;
+spawnBlood(this.body.x+this.body.w/2,this.body.y+this.body.h/2,12);
+this.say="Ow!";this.sayTime=60;
+if(this.body.hp<=0)this.kill();
+}
+if(this.burnTime<=0)this.burning=false;
+}}
+draw(){
+this.parts.forEach(p=>p.draw());
+
+if(this.hasGun && this.gunTarget){
+let bx=this.ra.x+10;
+let by=this.ra.y+4;
+let tx=this.gunTarget.x;
+let ty=this.gunTarget.y;
+let ang=Math.atan2(ty-by,tx-bx);
+ctx.save();
+ctx.translate(bx,by);
+ctx.rotate(ang);
+ctx.fillStyle="black";
+ctx.fillRect(0,-2,14,4);
+ctx.restore();
+}
+
+if(this.sayTime>0){drawSpeech(ctx,this.say,this.body.x+this.body.w/2,this.body.y-10);this.sayTime--;}
+}
+stun(){if(this.stunned)return;this.stunned=true;setTimeout(()=>this.stunned=false,2000);}
+ignite(){if(!this.burning){this.burning=true;this.burnTime=180;}}
+kill(){this.alive=false;this.say="I'm Dead.";this.sayTime=80;setTimeout(()=>{let i=people.indexOf(this);if(i>=0)people.splice(i,1);},1000);}
+}
+
+class ModCharacter extends PropHuman{
+constructor(x,y,img){super(x,y);this.img=img;}
+draw(){
+if(this.img){
+const feetY=this.rl.y+this.rl.h;
+const centerX=this.body.x+this.body.w/2;
+ctx.drawImage(this.img,centerX-32,feetY-64,64,64);
+}else super.draw();
+
+if(this.hasGun && this.gunTarget){
+let bx=this.ra.x+10;
+let by=this.ra.y+4;
+let tx=this.gunTarget.x;
+let ty=this.gunTarget.y;
+let ang=Math.atan2(ty-by,tx-bx);
+ctx.save();
+ctx.translate(bx,by);
+ctx.rotate(ang);
+ctx.fillStyle="black";
+ctx.fillRect(0,-2,14,4);
+ctx.restore();
+}
+
+if(this.sayTime>0){drawSpeech(ctx,this.say,this.body.x+this.body.w/2,this.body.y-10);this.sayTime--;}
+}
+}
+
+class Block{
+constructor(x,y,w,h,color){this.x=x;this.y=y;this.w=w;this.h=h;this.dragged=false;this.frozen=false;this.color=color||"#444";}
+update(){
+if(!this.frozen){this.y+=G;if(this.y+this.h>c.height-40)this.y=c.height-40-this.h;}
+if(this.x<LEFT_EDGE)this.x=LEFT_EDGE;
+if(this.x+this.w>c.width)this.x=c.width-this.w;
+if(this.dragged){this.x=mouse.x-this.w/2;this.y=mouse.y-this.h/2;}
+}
+draw(){ctx.fillStyle=this.color;ctx.fillRect(this.x,this.y,this.w,this.h);ctx.strokeStyle="#fff";ctx.strokeRect(this.x,this.y,this.w,this.h);}
+}
+
+class Bullet{
+constructor(x,y,dx,dy,faction){
+this.x=x;this.y=y;
+this.vx=dx*12;this.vy=dy*12;
+this.life=80;
+this.faction=faction;
+}
+update(){
+this.x+=this.vx;
+this.y+=this.vy;
+people.forEach(p=>{
+if(!p.alive)return;
+if(Math.hypot(p.body.x+10-this.x,p.body.y+10-this.y)<10){
+if(this.faction===FACTIONS.ALLY && p.faction!==FACTIONS.ENEMY) return;
+if(this.faction===FACTIONS.ENEMY && p.faction===FACTIONS.ENEMY) return;
+spawnBlood(this.x,this.y,20);
+p.say="Ow!";p.sayTime=60;
+p.kill();
+this.life=0;
+}
+});
+}
+draw(){ctx.fillStyle="yellow";ctx.fillRect(this.x,this.y,4,2);}
+}
+
+const enemyLines=["DIE!!!","HAHA!!","CATCH THIS!!"];
+
+class HumanEnemy extends PropHuman{
+constructor(x,y){super(x,y);this.attackCooldown=0;this.faction=FACTIONS.ENEMY;this.hasGun=true;}
+update(){
+if(!this.alive)return;
+let targets=people.filter(p=>p!==this&&p.alive&&p.faction!==FACTIONS.ENEMY);
+if(targets.length>0){
+let t=targets[0];
+let tx=t.body.x+10,ty=t.body.y+10;
+let dx=tx-(this.body.x+10),dy=ty-(this.body.y+10);
+let dist=Math.hypot(dx,dy)||1;
+this.walkDir=Math.sign(dx);
+this.gunTarget={x:tx,y:ty};
+this.attackCooldown--;
+if(this.attackCooldown<=0&&dist<300){
+bullets.push(new Bullet(this.body.x+10,this.body.y+10,dx/dist,dy/dist,FACTIONS.ENEMY));
+this.say=enemyLines[Math.floor(Math.random()*enemyLines.length)];
+this.sayTime=60;
+this.attackCooldown=60;
+}}
+super.update();
+}
+}
+
+class ModEnemy extends ModCharacter{
+constructor(x,y,img){super(x,y,img);this.attackCooldown=0;this.faction=FACTIONS.ENEMY;this.hasGun=true;}
+update(){
+if(!this.alive)return;
+let targets=people.filter(p=>p!==this&&p.alive&&p.faction!==FACTIONS.ENEMY);
+if(targets.length>0){
+let t=targets[0];
+let tx=t.body.x+10,ty=t.body.y+10;
+let dx=tx-(this.body.x+10),dy=ty-(this.body.y+10);
+let dist=Math.hypot(dx,dy)||1;
+this.walkDir=Math.sign(dx);
+this.gunTarget={x:tx,y:ty};
+this.attackCooldown--;
+if(this.attackCooldown<=0&&dist<300){
+bullets.push(new Bullet(this.body.x+10,this.body.y+10,dx/dist,dy/dist,FACTIONS.ENEMY));
+this.say=enemyLines[Math.floor(Math.random()*enemyLines.length)];
+this.sayTime=60;
+this.attackCooldown=60;
+}}
+super.update();
+}
+}
+
+class HumanAlly extends PropHuman{
+constructor(x,y){
+super(x,y);
+this.attackCooldown=0;
+this.faction=FACTIONS.ALLY;
+this.hasGun=true;
+}
+update(){
+if(!this.alive)return;
+let targets=people.filter(p=>p.alive&&p.faction===FACTIONS.ENEMY);
+if(targets.length>0){
+let t=targets[0];
+let tx=t.body.x+10,ty=t.body.y+10;
+let dx=tx-(this.body.x+10),dy=ty-(this.body.y+10);
+let dist=Math.hypot(dx,dy)||1;
+this.walkDir=Math.sign(dx);
+this.gunTarget={x:tx,y:ty};
+this.attackCooldown--;
+if(this.attackCooldown<=0&&dist<300){
+bullets.push(new Bullet(this.body.x+10,this.body.y+10,dx/dist,dy/dist,FACTIONS.ALLY));
+this.say="For justice!";this.sayTime=60;
+this.attackCooldown=60;
+}}
+super.update();
+}
+}
+
+class ModAlly extends ModCharacter{
+constructor(x,y,img){
+super(x,y,img);
+this.attackCooldown=0;
+this.faction=FACTIONS.ALLY;
+this.hasGun=true;
+}
+update(){
+if(!this.alive)return;
+let targets=people.filter(p=>p.alive&&p.faction===FACTIONS.ENEMY);
+if(targets.length>0){
+let t=targets[0];
+let tx=t.body.x+10,ty=t.body.y+10;
+let dx=tx-(this.body.x+10),dy=ty-(this.body.y+10);
+let dist=Math.hypot(dx,dy)||1;
+this.walkDir=Math.sign(dx);
+this.gunTarget={x:tx,y:ty};
+this.attackCooldown--;
+if(this.attackCooldown<=0&&dist<300){
+bullets.push(new Bullet(this.body.x+10,this.body.y+10,dx/dist,dy/dist,FACTIONS.ALLY));
+this.say="Helping!";this.sayTime=60;
+this.attackCooldown=60;
+}}
+super.update();
+}
+}
+
+// ---------- ARRAYS ----------
+let people=[],blocks=[],bullets=[],particles=[];
+
+// ---------- SPAWN ----------
+function select(evt,type){selected=type;document.querySelectorAll("#ui button").forEach(b=>b.classList.remove("active"));evt.target.classList.add("active");}
+
+addEventListener("keydown",e=>{
+if(e.key==="q")holdingQ=true;
+if(e.key==="z"){let last=undoStack.pop();if(last)last();}
+if(e.key==="f"){blocks.forEach(b=>{if(b.dragged)b.frozen=!b.frozen;});}
+if(e.key==="e"){
+if(selected==="person"){let p=new PropHuman(mouse.x,mouse.y);people.push(p);undoStack.push(()=>people.pop());}
+if(selected==="mod"&&modImage){let m=new ModCharacter(mouse.x,mouse.y,modImage);people.push(m);undoStack.push(()=>people.pop());}
+if(selected==="humanEnemy"){let h=new HumanEnemy(mouse.x,mouse.y);people.push(h);undoStack.push(()=>people.pop());}
+if(selected==="modEnemy"&&modImage){let m=new ModEnemy(mouse.x,mouse.y,modImage);people.push(m);undoStack.push(()=>people.pop());}
+if(selected==="humanAlly"){let h=new HumanAlly(mouse.x,mouse.y);people.push(h);undoStack.push(()=>people.pop());}
+if(selected==="modAlly"&&modImage){let m=new ModAlly(mouse.x,mouse.y,modImage);people.push(m);undoStack.push(()=>people.pop());}
+if(selected==="block"){let b=new Block(mouse.x-25,mouse.y-25,50,50,currentBlockColor);blocks.push(b);undoStack.push(()=>blocks.pop());}
+}});
+
+addEventListener("keyup",e=>{if(e.key==="q")holdingQ=false;});
+c.onmousemove=e=>{mouse.x=e.offsetX;mouse.y=e.offsetY;};
+c.onmousedown=()=>{people.forEach(p=>{if(p.parts&&Math.hypot(mouse.x-(p.body.x+p.body.w/2),mouse.y-(p.body.y+p.body.h/2))<30)p.dragged=true;});
+blocks.forEach(b=>{if(mouse.x>b.x&&mouse.x<b.x+b.w&&mouse.y>b.y&&mouse.y<b.y+b.h)b.dragged=true;});};
+c.onmouseup=()=>{people.forEach(p=>p.dragged=false);blocks.forEach(b=>b.dragged=false);};
+c.addEventListener("wheel",e=>{blocks.forEach(b=>{if(b.dragged){b.w+=e.deltaY>0?-5:5;b.h+=e.deltaY>0?-5:5;if(b.w<10)b.w=10;if(b.h<10)b.h=10;}});});
+
+// ---------- TOOLS ----------
+function useTool(){
+if(!holdingQ)return;
+let ox=mouse.x,oy=mouse.y;
+let dx=mouse.x-c.width/2,dy=mouse.y-c.height/2,mag=Math.hypot(dx,dy)||1;
+dx/=mag;dy/=mag;
+if(selected==="gun"){bullets.push(new Bullet(ox,oy,dx,dy,FACTIONS.NEUTRAL));}
+if(selected==="electric"){
+people.forEach(p=>{let px=p.head.x,py=p.head.y;if(Math.hypot(mouse.x-px,mouse.y-py)<60)p.stun();});
+ctx.strokeStyle="cyan";ctx.beginPath();ctx.moveTo(ox,oy);ctx.lineTo(ox+dx*80,oy+dy*80);ctx.stroke();
+}
+if(selected==="fire"){
+people.forEach(p=>{let px=p.head.x,py=p.head.y;if(Math.hypot(mouse.x-px,mouse.y-py)<60)p.ignite();});
+for(let i=0;i<4;i++)particles.push({x:ox,y:oy,vx:dx*3+(Math.random()-0.5),vy:dy*3+(Math.random()-0.5),life:30,color:"orange"});
+}
+}
+
+function spawnBlood(x,y,n){for(let i=0;i<n;i++)particles.push({x,y,vx:Math.random()*2-1,vy:Math.random()*-2,life:40});}
+
+// ---------- COLOR ----------
+document.getElementById("blockColor").addEventListener("input",e=>{currentBlockColor=e.target.value;});
+
+// ---------- SAVE ----------
+function saveGameFile(){
+const data={people:[],blocks:[]};
+people.forEach(p=>{let obj={type:p.constructor.name,x:p.body.x,y:p.body.y};data.people.push(obj);});
+blocks.forEach(b=>data.blocks.push({
+x:b.x,
+y:b.y,
+w:b.w,
+h:b.h,
+color:b.color,
+frozen:b.frozen
+}));
+const blob=new Blob([JSON.stringify(data)],{type:"application/json"});
+const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="save.json";a.click();
+}
+
+document.getElementById("loadFile").addEventListener("change",e=>{
+const file=e.target.files[0];if(!file)return;
+const reader=new FileReader();
+reader.onload=function(){
+const data=JSON.parse(reader.result);
+people=[];blocks=[];
+data.people.forEach(p=>{
+if(p.type==="PropHuman")people.push(new PropHuman(p.x,p.y));
+if(p.type==="ModCharacter"&&modImage)people.push(new ModCharacter(p.x,p.y,modImage));
+if(p.type==="HumanEnemy")people.push(new HumanEnemy(p.x,p.y));
+if(p.type==="ModEnemy"&&modImage)people.push(new ModEnemy(p.x,p.y,modImage));
+if(p.type==="HumanAlly")people.push(new HumanAlly(p.x,p.y));
+if(p.type==="ModAlly"&&modImage)people.push(new ModAlly(p.x,p.y,modImage));
+});
+data.blocks.forEach(b=>{
+const block = new Block(b.x,b.y,b.w,b.h,b.color);
+block.frozen = !!b.frozen;
+blocks.push(block);
+});
+};
+reader.readAsText(file);
+});
+
+// ---------- LOOP ----------
+function loop(){
+ctx.clearRect(0,0,c.width,c.height);
+ctx.fillStyle="#333";ctx.fillRect(0,c.height-40,c.width,40);
+blocks.forEach(b=>{b.update();b.draw();});
+people.forEach(p=>{p.update();p.draw();});
+bullets=bullets.filter(b=>b.life>0);
+bullets.forEach(b=>{b.update();b.draw();});
+particles=particles.filter(p=>p.life--);
+particles.forEach(p=>{p.vy+=0.2;p.x+=p.vx;p.y+=p.vy;ctx.fillStyle=p.color||"red";ctx.fillRect(p.x,p.y,2,2);});
+useTool();requestAnimationFrame(loop);
+}
+loop();
+
+// ---------- MOD ----------
+document.getElementById("modFile").onchange=e=>{
+const file=e.target.files[0];if(!file)return;
+const img=new Image();img.src=URL.createObjectURL(file);
+img.onload=()=>{modImage=img;alert("Mod character loaded! Press E to spawn");};
+};
+</script>
+</body>
+</html>
